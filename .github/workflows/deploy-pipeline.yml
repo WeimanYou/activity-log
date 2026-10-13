@@ -2,7 +2,7 @@ name: CI/CD Deployment Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ] # 確保不管預設分支叫 main 還是 master 都會觸發
   workflow_dispatch:
 
 jobs:
@@ -15,10 +15,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22' # 解決 Node 版本警告
+          node-version: '22'
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2 # 解決 bun: not found 錯誤
+        uses: oven-sh/setup-bun@v2
 
       - name: Build Project
         run: |
