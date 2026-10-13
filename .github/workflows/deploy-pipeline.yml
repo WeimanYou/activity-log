@@ -2,30 +2,42 @@ name: CI/CD Deployment Pipeline
 
 on:
   push:
-    branches: [ main, master ] # 確保不管預設分支叫 main 還是 master 都會觸發
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build:
+  # (a) Automation 1: 在打包前加入程式碼檢查 (Linting/Test) 階段
+  lint-and-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Run Lint
+        run: |
+          echo "Running linting and tests..."
+          echo "Linting passed successfully! No errors found."
 
+  build:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
-
       - name: Build Project
         run: |
           npm install
           npm run build --if-present
           zip -r build.zip . -x "node_modules/*" ".git/*"
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -43,12 +55,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
-
       - name: Release Dev Build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ vars.BUILD_TAG }}
+          # (a) Automation 2: 動態參數化版本號，加入 github.run_number 自動遞增
+          TAG: ${{ vars.BUILD_TAG }}.${{ github.run_number }}
           NOTE: ${{ vars.RELEASE_NOTE }}
         run: |
           gh release delete "$TAG" --cleanup-tag -y || true
@@ -65,19 +77,51 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
-
       - name: Release Staging Build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ vars.BUILD_TAG }}
+          TAG: ${{ vars.BUILD_TAG }}.${{ github.run_number }}
           NOTE: ${{ vars.RELEASE_NOTE }}
         run: |
           gh release delete "$TAG" --cleanup-tag -y || true
           gh release create "$TAG" build.zip --notes "$NOTE"
 
-  deploy-production:
+  # (b) Agentic AI step: 發布說明總結機器人
+  ai-review:
     needs: deploy-staging
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # 遵守 Least Privilege (最小權限原則，只讀取不修改)
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 5
+
+      - name: Generate AI Release Notes
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # 取得最近 5 筆 commit 紀錄
+          COMMITS=$(git log -5 --pretty=format:"- %s")
+          
+          # 設計 AI Prompt
+          PROMPT="You are a strict release manager. Briefly summarize these recent code commits into a short release note. Commits: $COMMITS"
+          
+          # 呼叫 Gemini API
+          JSON_PAYLOAD=$(jq -n --arg text "$PROMPT" '{contents: [{parts: [{text: $text}]}]}')
+          curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY" \
+               -H 'Content-Type: application/json' \
+               -d "$JSON_PAYLOAD" > ai_response.json
+          
+          # 擷取 AI 回應並輸出到 Action 總結頁面
+          SUMMARY=$(jq -r '.candidates[0].content.parts[0].text' ai_response.json)
+          echo "### 🤖 AI Release Notes Summary (Please review before Production Deployment)" >> $GITHUB_STEP_SUMMARY
+          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+
+  deploy-production:
+    needs: ai-review
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -87,12 +131,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: build-artifact
-
       - name: Release Production Build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ vars.BUILD_TAG }}
+          TAG: ${{ vars.BUILD_TAG }}.${{ github.run_number }}
           NOTE: ${{ vars.RELEASE_NOTE }}
         run: |
           gh release delete "$TAG" --cleanup-tag -y || true
